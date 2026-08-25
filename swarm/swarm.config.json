@@ -1,0 +1,15 @@
+{
+  "roles": {
+    "planner": [{ "providerID": "opencode-go", "modelID": "hy3" }],
+    "worker": [
+      { "providerID": "opencode-go", "modelID": "deepseek-v4-flash", "concurrency": 8 }
+    ],
+    "integrator": [{ "providerID": "opencode-go", "modelID": "hy3" }],
+    "fixer": [{ "providerID": "opencode-go", "modelID": "deepseek-v4-flash" }],
+    "reviewer": [{ "providerID": "opencode-go", "modelID": "hy3" }],
+    "tester": []
+  },
+  "workerTimeoutMs": 480000,
+  "staggerMs": 1500,
+  "testerPercent": 20
+}

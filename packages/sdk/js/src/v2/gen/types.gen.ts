@@ -1867,6 +1867,45 @@ export type McpRemoteConfig = {
   timeout?: number
 }
 
+export type SwarmModel = {
+  /**
+   * Provider ID, eg opencode-go
+   */
+  providerID: string
+  /**
+   * Model ID, eg deepseek-v4-flash
+   */
+  modelID: string
+}
+
+export type SwarmPoolEntry = {
+  /**
+   * Provider ID, eg opencode-go
+   */
+  providerID: string
+  /**
+   * Model ID, eg deepseek-v4-flash
+   */
+  modelID: string
+  concurrency?: number
+}
+
+export type SwarmRoles = {
+  planner?: Array<SwarmModel>
+  worker?: Array<SwarmPoolEntry>
+  integrator?: Array<SwarmModel>
+  fixer?: Array<SwarmModel>
+  reviewer?: Array<SwarmModel>
+  tester?: Array<SwarmModel>
+}
+
+export type SwarmConfig = {
+  roles?: SwarmRoles
+  workerTimeoutMs?: number
+  staggerMs?: number
+  testerPercent?: number
+}
+
 /**
  * @deprecated Always uses stretch layout.
  */
@@ -1960,6 +1999,7 @@ export type Config = {
           enabled: boolean
         }
   }
+  swarm?: SwarmConfig
   /**
    * Enable or configure formatters. Omit or set to false to disable, true to enable built-ins, or an object to enable built-ins with overrides.
    */

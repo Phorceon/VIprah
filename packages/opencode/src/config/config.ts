@@ -407,6 +407,12 @@ const layer = Layer.effect(
           for (const file of yield* ConfigPaths.files("opencode", ctx.directory, ctx.worktree).pipe(Effect.orDie)) {
             yield* merge(file, yield* loadFile(file, authEnv), "local")
           }
+          // Config.update writes <instance dir>/config.json; the walking-up
+          // lookup above only covers opencode.json(c), so load it explicitly
+          for (const name of ["config.json", "config.jsonc"]) {
+            const file = path.join(ctx.directory, name)
+            yield* merge(file, yield* loadFile(file, authEnv), "local")
+          }
         }
 
         result.agent = result.agent || {}
