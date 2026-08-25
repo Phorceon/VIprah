@@ -8,18 +8,19 @@ import { SessionEvent } from "./event"
 import { SessionMessage } from "./message"
 import { SessionSchema } from "./schema"
 import { Token } from "../util/token"
+import { ContextCompiler } from "./context"
 
-const DEFAULT_BUFFER = 20_000
-const DEFAULT_KEEP_TOKENS = 8_000
-const TOOL_OUTPUT_MAX_CHARS = 2_000
-const SUMMARY_OUTPUT_TOKENS = 4_096
+const DEFAULT_BUFFER = ContextCompiler.DEFAULT_RESERVE_TOKENS
+const DEFAULT_KEEP_TOKENS = ContextCompiler.DEFAULT_RECENT_HISTORY_TOKENS
+const TOOL_OUTPUT_MAX_CHARS = ContextCompiler.DEFAULT_TOOL_OUTPUT_MAX_CHARS
+const SUMMARY_OUTPUT_TOKENS = ContextCompiler.DEFAULT_SUMMARY_OUTPUT_TOKENS
 const SUMMARY_TEMPLATE = `Output exactly the Markdown structure shown inside <template> and keep the section order unchanged. Do not include the <template> tags in your response.
 <template>
 ## Objective
-- [one or two brief sentences describing what the user is trying to accomplish]
+- [one or two brief sentences describing the user's goals and intended outcome]
 
 ## Important Details
-- [constraints/preferences, decisions and why, important facts/assumptions, exact context needed to continue, or "(none)"]
+- [constraints/preferences, key decisions and why, important facts/assumptions, and critical context needed to continue, or "(none)"]
 
 ## Work State
 ### Completed
@@ -32,15 +33,16 @@ const SUMMARY_TEMPLATE = `Output exactly the Markdown structure shown inside <te
 - [blockers, failing commands, or unknowns; otherwise "(none)"]
 
 ## Next Move
-1. [immediate concrete action, or "(none)"]
-2. [next action if known, or "(none)"]
+1. [immediate concrete next step, or "(none)"]
+2. [next step if known, or "(none)"]
 
 ## Relevant Files
-- [file or directory path: why it matters, or "(none)"]
+- [file or directory path and why it matters to the next agent, or "(none)"]
 </template>
 
 Rules:
 - Keep every section, even when empty.
+- Treat Objective as goals, Important Details as constraints/preferences and key decisions, Work State as progress, Next Move as next steps, and Relevant Files as critical context.
 - Use terse bullets, not prose paragraphs.
 - Preserve exact file paths, symbols, commands, error strings, URLs, and identifiers when known.
 - Do not mention the summary process or that context was compacted.`
@@ -79,8 +81,6 @@ type Input = {
   readonly model: Model
   readonly request: LLMRequest
 }
-
-const estimate = (value: unknown) => Token.estimate(JSON.stringify(value))
 
 const truncate = (value: string) =>
   value.length <= TOOL_OUTPUT_MAX_CHARS ? value : `${value.slice(0, TOOL_OUTPUT_MAX_CHARS)}\n[truncated]`
@@ -142,7 +142,7 @@ const select = (
     .filter((entry) => entry.message.type !== "compaction")
     .map((entry) => serialize(entry.message))
     .filter(Boolean)
-  if (conversation.length === 0) return
+  if (conversation.length === 0) return undefined
   let total = 0
   let split = conversation.length
   for (let index = conversation.length - 1; index >= 0; index--) {
@@ -235,7 +235,11 @@ export const make = (dependencies: Dependencies) => {
     if (context === undefined || context <= 0) return false
     const output = input.request.generation?.maxTokens ?? input.model.route.defaults.limits?.output ?? 0
     if (
-      estimate({ system: input.request.system, messages: input.request.messages, tools: input.request.tools }) <=
+      ContextCompiler.estimateRequest({
+        system: input.request.system,
+        messages: input.request.messages,
+        tools: input.request.tools,
+      }) <=
       context - Math.max(output, config.buffer)
     )
       return false

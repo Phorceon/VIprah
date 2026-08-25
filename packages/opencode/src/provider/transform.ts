@@ -1260,6 +1260,11 @@ export function options(input: {
   if (input.providerOptions?.setCacheKey !== false) {
     if (input.model.api.npm === "@ai-sdk/deepinfra" || input.model.api.npm === "@ai-sdk/cerebras") {
       result["prompt_cache_key"] = input.sessionID
+    } else if (input.model.api.npm === "@ai-sdk/openai-compatible" && input.providerOptions?.setCacheKey === true) {
+      // The generic adapter forwards unknown provider options verbatim. Unlike
+      // @ai-sdk/openai, it does not translate promptCacheKey to the wire name,
+      // so use the OpenAI-compatible Chat Completions field explicitly.
+      result["prompt_cache_key"] = input.sessionID
     } else if (
       input.model.api.npm === "@ai-sdk/openai" ||
       input.model.api.npm === "@ai-sdk/azure" ||

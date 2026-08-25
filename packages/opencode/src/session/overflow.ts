@@ -4,8 +4,9 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 import type { Provider } from "@/provider/provider"
 import { ProviderTransform } from "@/provider/transform"
 import type { MessageV2 } from "./message-v2"
+import { ContextCompiler } from "@opencode-ai/core/session/context"
 
-const COMPACTION_BUFFER = 20_000
+const COMPACTION_BUFFER = ContextCompiler.DEFAULT_RESERVE_TOKENS
 
 export function usable(input: { cfg: ConfigV1.Info; model: Provider.Model; outputTokenMax?: number }) {
   const context = input.model.limit.context

@@ -21,16 +21,17 @@ import { EventV2Bridge } from "@/event-v2-bridge"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { buildPrompt } from "@opencode-ai/core/session/compaction"
+import { ContextCompiler } from "@opencode-ai/core/session/context"
 import { SessionCompactionEvent } from "@opencode-ai/schema/session-compaction-event"
 
 export const Event = SessionCompactionEvent
 
 export const PRUNE_MINIMUM = 20_000
 export const PRUNE_PROTECT = 40_000
-const TOOL_OUTPUT_MAX_CHARS = 2_000
+const TOOL_OUTPUT_MAX_CHARS = ContextCompiler.DEFAULT_TOOL_OUTPUT_MAX_CHARS
 const PRUNE_PROTECTED_TOOLS = ["skill"]
 const MIN_PRESERVE_RECENT_TOKENS = 2_000
-const MAX_PRESERVE_RECENT_TOKENS = 15_000
+const MAX_PRESERVE_RECENT_TOKENS = ContextCompiler.DEFAULT_RECENT_HISTORY_TOKENS
 type Turn = {
   start: number
   end: number

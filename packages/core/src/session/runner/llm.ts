@@ -4,7 +4,6 @@ import {
   LLMError,
   LLMEvent,
   Message,
-  SystemPart,
   isContextOverflowFailure,
   type ProviderErrorEvent,
 } from "@opencode-ai/llm"
@@ -25,6 +24,7 @@ import { ReferenceGuidance } from "../../reference/guidance"
 import { ToolRegistry } from "../../tool/registry"
 import { ToolOutputStore } from "../../tool-output-store"
 import { SessionContextEpoch } from "../context-epoch"
+import { ContextCompiler } from "../context"
 import { SessionCompaction } from "../compaction"
 import { SessionEvent } from "../event"
 import { SessionHistory } from "../history"
@@ -202,6 +202,20 @@ const layer = Layer.effect(
       const isLastStep = agent.info?.steps !== undefined && currentStep >= agent.info.steps
       const toolMaterialization = isLastStep ? undefined : yield* tools.materialize(agent.info?.permissions)
       const promptCacheKey = /^ses_[0-9a-f]{64}$/.test(session.id) ? session.id.slice(4) : session.id
+      const compiled = ContextCompiler.compile({
+        model,
+        policy: { reserveTokens: ContextCompiler.DEFAULT_RESERVE_TOKENS },
+        outputTokens: model.route.defaults.limits?.output,
+        system: [
+          ...(agent.info?.system === undefined
+            ? []
+            : [{ key: "agent", text: agent.info.system, stable: true, order: 0 }]),
+          { key: "system-context", text: system.baseline, stable: true, order: 1 },
+        ],
+        messages: [...toLLMMessages(context, model), ...(isLastStep ? [Message.assistant(MAX_STEPS_PROMPT)] : [])],
+        tools: toolMaterialization?.definitions ?? [],
+        retainHistory: true,
+      })
       const request = LLM.request({
         model,
         http: {
@@ -212,11 +226,10 @@ const layer = Layer.effect(
           },
         },
         providerOptions: { openai: { promptCacheKey } },
-        system: [agent.info?.system, system.baseline]
-          .filter((part): part is string => part !== undefined && part.length > 0)
-          .map(SystemPart.make),
-        messages: [...toLLMMessages(context, model), ...(isLastStep ? [Message.assistant(MAX_STEPS_PROMPT)] : [])],
-        tools: toolMaterialization?.definitions ?? [],
+        cache: ContextCompiler.DEFAULT_PROMPT_CACHE_POLICY,
+        system: compiled.system,
+        messages: compiled.messages,
+        tools: compiled.tools,
         toolChoice: isLastStep ? "none" : undefined,
       })
       if (yield* compaction.compactIfNeeded({ sessionID: session.id, entries, model, request }))

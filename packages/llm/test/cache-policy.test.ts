@@ -179,6 +179,30 @@ describe("applyCachePolicy", () => {
     }),
   )
 
+  it.effect("stable prefix policy marks system and tools without moving with history", () =>
+    Effect.gen(function* () {
+      const prepared = yield* LLMClient.prepare(
+        LLM.request({
+          model: anthropicModel,
+          system: "Stable instructions",
+          tools: [{ name: "t1", description: "t1", inputSchema: { type: "object", properties: {} } }],
+          messages: [Message.user("first"), Message.assistant("reply"), Message.user("latest")],
+          cache: { tools: true, system: true },
+        }),
+      )
+
+      expect(prepared.body).toMatchObject({
+        tools: [{ name: "t1", cache_control: { type: "ephemeral" } }],
+        system: [{ type: "text", text: "Stable instructions", cache_control: { type: "ephemeral" } }],
+        messages: [
+          { role: "user", content: [{ type: "text", text: "first" }] },
+          { role: "assistant", content: [{ type: "text", text: "reply" }] },
+          { role: "user", content: [{ type: "text", text: "latest" }] },
+        ],
+      })
+    }),
+  )
+
   it.effect("auto policy preserves manual CacheHints on other parts", () =>
     Effect.gen(function* () {
       const prepared = yield* LLMClient.prepare(

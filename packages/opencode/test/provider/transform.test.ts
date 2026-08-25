@@ -114,6 +114,20 @@ describe("ProviderTransform.options - setCacheKey", () => {
     expect(result.promptCacheKey).toBeUndefined()
   })
 
+  test("should set the wire cache key for an OpenAI-compatible provider when enabled", () => {
+    const result = ProviderTransform.options({
+      model: {
+        ...mockModel,
+        providerID: "local",
+        api: { id: "fake", url: "http://localhost/v1", npm: "@ai-sdk/openai-compatible" },
+      },
+      sessionID,
+      providerOptions: { setCacheKey: true },
+    })
+    expect(result.prompt_cache_key).toBe(sessionID)
+    expect(result.promptCacheKey).toBeUndefined()
+  })
+
   test("should not set promptCacheKey for openai when explicitly disabled", () => {
     const openaiModel = {
       ...mockModel,

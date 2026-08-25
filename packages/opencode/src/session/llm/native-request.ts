@@ -12,6 +12,7 @@ import {
 import type { ModelMessage } from "ai"
 import type { Provider } from "@/provider/provider"
 import { isRecord } from "@/util/record"
+import { ContextCompiler } from "@opencode-ai/core/session/context"
 
 type ToolInput = {
   readonly description?: string
@@ -190,6 +191,7 @@ export const request = (input: RequestInput) => {
     toolChoice: input.toolChoice,
     generation: generation(input),
     providerOptions: input.providerOptions,
+    cache: ContextCompiler.DEFAULT_PROMPT_CACHE_POLICY,
   })
 }
 
