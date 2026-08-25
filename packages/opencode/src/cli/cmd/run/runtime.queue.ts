@@ -40,6 +40,14 @@ type State = {
   closed: boolean
 }
 
+const IDLE_GC_THRESHOLD_BYTES = 256 * 1024 * 1024
+
+function collectIdleMemory(): void {
+  if (process.memoryUsage().rss < IDLE_GC_THRESHOLD_BYTES) return
+  const bun = (globalThis as typeof globalThis & { Bun?: { gc?: (force?: boolean) => void } }).Bun
+  bun?.gc?.(true)
+}
+
 function defer<T = void>(): Deferred<T> {
   let resolve!: (value: T | PromiseLike<T>) => void
   let reject!: (error?: unknown) => void
@@ -259,6 +267,9 @@ export async function runPromptQueue(input: QueueInput): Promise<void> {
             queue: state.queue.length,
           },
         )
+        // Provider turns can build large temporary model/tool projections. Ask
+        // Bun to reclaim them once the UI is idle; this is a no-op on Node.
+        queueMicrotask(collectIdleMemory)
       }
 
       finish()

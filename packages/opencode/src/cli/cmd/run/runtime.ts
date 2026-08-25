@@ -18,6 +18,7 @@ import { MessageID } from "@/session/schema"
 import { createRunDemo } from "./demo"
 import { resolveModelInfo, resolveRunTuiConfig, resolveSessionInfo } from "./runtime.boot"
 import { createRuntimeLifecycle } from "./runtime.lifecycle"
+import { PROMPT_HISTORY_LIMIT } from "./prompt.shared"
 import { trace } from "./trace"
 import { cycleVariant, formatModelLabel, resolveSavedVariant, resolveVariant, saveVariant } from "./variant.shared"
 import type { LocalReplayAnchor, LocalReplayRow, RunInput, RunPrompt, RunProvider, StreamCommit } from "./types"
@@ -194,16 +195,19 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
         })
   const savedTask = resolveSavedVariant(ctx.model)
   const [tuiConfig, session, savedVariant] = await Promise.all([tuiConfigTask, sessionTask, savedTask])
+  const sessionFirst = session.first
+  const sessionVariant = session.variant
+  const sessionHistory = session.history.slice(-PROMPT_HISTORY_LIMIT)
   const state: RuntimeState = {
-    shown: !session.first,
+    shown: !sessionFirst,
     aborting: false,
     model: ctx.model,
     providers: [],
     variants: [],
     limits: {},
-    activeVariant: resolveVariant(ctx.variant, session.variant, savedVariant, []),
+    activeVariant: resolveVariant(ctx.variant, sessionVariant, savedVariant, []),
     sessionID: ctx.sessionID,
-    history: [...session.history],
+    history: sessionHistory,
     localRows: [],
     sessionTitle: ctx.sessionTitle,
     agent: ctx.agent,
@@ -237,8 +241,8 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
     sessionID: state.sessionID,
     sessionTitle: state.sessionTitle,
     getSessionID: () => state.sessionID,
-    first: session.first,
-    history: session.history,
+    first: sessionFirst,
+    history: state.history,
     agent: state.agent,
     model: state.model,
     variant: state.activeVariant,
@@ -432,7 +436,7 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
     state.variants = variantsFor(state.providers, state.model)
     state.limits = info.limits
 
-    const next = resolveVariant(ctx.variant, session.variant, savedVariant, state.variants)
+    const next = resolveVariant(ctx.variant, sessionVariant, savedVariant, state.variants)
     if (next !== state.activeVariant) {
       state.activeVariant = next
     }
@@ -549,6 +553,9 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
       onSend: (prompt) => {
         state.shown = true
         state.history.push(prompt)
+        if (state.history.length > PROMPT_HISTORY_LIMIT) {
+          state.history.splice(0, state.history.length - PROMPT_HISTORY_LIMIT)
+        }
         if (prompt.mode !== "shell") {
           rememberLocal({
             kind: "user",

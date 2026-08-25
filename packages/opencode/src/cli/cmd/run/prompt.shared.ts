@@ -10,7 +10,7 @@
 export { displayCharAt, displaySlice, mentionTriggerIndex } from "../prompt-display"
 import type { RunPrompt } from "./types"
 
-const HISTORY_LIMIT = 200
+export const PROMPT_HISTORY_LIMIT = 200
 
 export type PromptHistoryState = {
   items: RunPrompt[]
@@ -64,7 +64,7 @@ export function createPromptHistory(items?: RunPrompt[]): PromptHistoryState {
   }
 
   return {
-    items: next.slice(-HISTORY_LIMIT),
+    items: next.slice(-PROMPT_HISTORY_LIMIT),
     index: null,
     draft: "",
   }
@@ -84,7 +84,7 @@ export function pushPromptHistory(state: PromptHistoryState, prompt: RunPrompt):
     }
   }
 
-  const items = [...state.items, next].slice(-HISTORY_LIMIT)
+  const items = [...state.items, next].slice(-PROMPT_HISTORY_LIMIT)
   return {
     ...state,
     items,
