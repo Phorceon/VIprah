@@ -1,5 +1,6 @@
 import path from "node:path"
 import { pathToFileURL } from "node:url"
+import { modify, applyEdits, parseTree, findNodeAtLocation } from "jsonc-parser"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
@@ -17,6 +18,8 @@ import {
 } from "@modelcontextprotocol/sdk/types.js"
 import { Config } from "@/config/config"
 import { ConfigMCPV1 } from "@opencode-ai/core/v1/config/mcp"
+import { Flag } from "@opencode-ai/core/flag/flag"
+import { Global } from "@opencode-ai/core/global"
 import { NamedError } from "@opencode-ai/core/util/error"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { withTimeout } from "@/util/timeout"
@@ -414,6 +417,7 @@ const layer = Layer.effect(
       }),
     )
     const cfgSvc = yield* Config.Service
+    const fsu = yield* FSUtil.Service
 
     const descendants = Effect.fnUntraced(
       function* (pid: number) {
@@ -648,6 +652,7 @@ const layer = Layer.effect(
     const connect = Effect.fn("MCP.connect")(function* (name: string) {
       const mcp = yield* requireMcpConfig(name)
       yield* createAndStore(name, { ...mcp, enabled: true })
+      yield* persistEnabled(name, true)
     })
 
     const disconnect = Effect.fn("MCP.disconnect")(function* (name: string) {
@@ -656,7 +661,75 @@ const layer = Layer.effect(
       yield* closeClient(s, name)
       delete s.clients[name]
       s.status[name] = { status: "disabled" }
+      yield* persistEnabled(name, false)
     })
+
+    // TUI/SDK toggles must survive restarts, so mirror the new state into the config file that defines the
+    // server. Persistence failure must not break the runtime toggle.
+    const persistEnabled = Effect.fnUntraced(function* (name: string, enabled: boolean) {
+      yield* persistEnabledInner(name, enabled).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("failed to persist MCP enabled state", { name, enabled, error: String(Cause.squash(cause)) }),
+        ),
+      )
+    })
+
+    function persistEnabledInner(name: string, enabled: boolean) {
+      return Effect.gen(function* () {
+        const directory = yield* InstanceState.directory
+
+        const globals = ["opencode.jsonc", "opencode.json", "config.json"].map((file) =>
+          path.join(Global.Path.config, file),
+        )
+        const candidates = [
+          ...["config.json", "opencode.json", "opencode.jsonc"].map((file) => path.join(Global.Path.config, file)),
+          ...(Flag.OPENCODE_CONFIG ? [Flag.OPENCODE_CONFIG] : []),
+        ]
+        if (!Flag.OPENCODE_DISABLE_PROJECT_CONFIG) {
+          candidates.push(
+            ...(yield* fsu
+              .up({
+                targets: ["opencode.jsonc", "opencode.json", ".opencode/opencode.jsonc", ".opencode/opencode.json"],
+                start: directory,
+              })
+              .pipe(Effect.orDie)).toReversed(),
+          )
+        }
+        if (Flag.OPENCODE_CONFIG_DIR) {
+          candidates.push(
+            path.join(Flag.OPENCODE_CONFIG_DIR, "opencode.json"),
+            path.join(Flag.OPENCODE_CONFIG_DIR, "opencode.jsonc"),
+          )
+        }
+
+        const defining = yield* Effect.forEach(
+          candidates,
+          (file) =>
+            Effect.gen(function* () {
+              const text = yield* fsu.readFileStringSafe(file).pipe(Effect.orDie)
+              if (!text) return undefined
+              const tree = parseTree(text)
+              return tree && findNodeAtLocation(tree, ["mcp", name]) ? file : undefined
+            }),
+          { concurrency: "unbounded" },
+        ).pipe(Effect.map((files) => files.filter((file) => file !== undefined)))
+
+        // Later candidates win when configs merge, so persist to the last file defining the server. When no
+        // file defines it (remote or OPENCODE_CONFIG_CONTENT config), fall back to the global file; a stub
+        // entry without a server type is ignored on its own at load time.
+        const fallback = yield* Effect.forEach(globals, (file) => fsu.existsSafe(file), {
+          concurrency: "unbounded",
+        }).pipe(Effect.map((flags) => globals[flags.indexOf(true)] ?? globals[0]))
+
+        const target = defining.at(-1) ?? fallback
+        const text = (yield* fsu.readFileStringSafe(target).pipe(Effect.orDie)) ?? "{}"
+        const edits = modify(text, ["mcp", name, "enabled"], enabled, {
+          formattingOptions: { tabSize: 2, insertSpaces: true },
+        })
+        yield* fsu.writeWithDirs(target, applyEdits(text, edits)).pipe(Effect.orDie)
+        yield* Effect.logInfo("persisted MCP enabled state", { name, enabled, path: target })
+      })
+    }
 
     function requestTimeout(s: State, name: string, configured: McpEntry | undefined, fallback?: number) {
       const staticTimeout = configured && isMcpConfigured(configured) ? configured.timeout : undefined
@@ -998,7 +1071,7 @@ export type AuthStatus = "authenticated" | "expired" | "not_authenticated"
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [CrossSpawnSpawner.node, McpAuth.node, EventV2Bridge.node, Config.node, McpBrowser.node],
+  deps: [CrossSpawnSpawner.node, McpAuth.node, EventV2Bridge.node, Config.node, McpBrowser.node, FSUtil.node],
 })
 
 export * as MCP from "."
