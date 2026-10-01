@@ -63,6 +63,15 @@ const post = (path: string, body?: unknown) =>
 
 const createSession = async (dir: string) => (await post(`/session${q(dir)}`)).id as string
 
+const alive = (pid: number) => {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
 type Part = { type: "text"; text: string } | { type: "file"; mime: string; url: string; filename: string }
 
 // long-form roles (planner, integrator, fixer, reviewer) can exceed bun's
@@ -468,6 +477,7 @@ async function runTester(id: string, files: string[], plan: Plan, hasBrowser: bo
 // after the build waves merge, a share of sub-agents re-launch as QA testers,
 // each browser-testing a slice of the changed output
 async function testWave(plan: Plan, startCommit: string, at: () => string) {
+  if (!config.testerPercent) return { pass: true, issues: [], testers: 0 }
   const changed = (await $`git -C ${PROJECT} diff --name-only ${startCommit} HEAD`.text())
     .split("\n")
     .map((s) => s.trim())
@@ -599,22 +609,34 @@ async function main() {
   const at = () => ((performance.now() - t0) / 1000).toFixed(1) + "s"
 
   // one driver per project: a previous crashed driver may still be running
-  // and its cleanup would delete this run's branches out from under it
+  // and its cleanup would delete this run's branches out from under it.
+  // The lock dir carries the holder's pid so a dead holder can be reclaimed.
   const lock = `${WORKTREE_ROOT}/driver-${Buffer.from(PROJECT).toString("base64url")}.lock`
-  try {
-    await $`mkdir ${lock}`.quiet()
-  } catch {
+  await $`mkdir -p ${WORKTREE_ROOT}`.quiet()
+  for (;;) {
+    const taken = (await $`mkdir ${lock}`.quiet().nothrow()).exitCode !== 0
+    if (!taken) break
+    const pid = Number(await Bun.file(`${lock}/pid`).text().catch(() => ""))
+    if (pid && !alive(pid)) {
+      await $`rm -rf ${lock}`.quiet().nothrow()
+      continue
+    }
     throw new Error(`another driver is already running for ${PROJECT} (${lock})`)
   }
+  await Bun.write(`${lock}/pid`, String(process.pid))
   process.on("exit", () => {
     // must be synchronous: the exit event does not await promises
-    const { rmdirSync } = require("node:fs")
+    const { rmSync } = require("node:fs")
     try {
-      rmdirSync(lock)
+      rmSync(lock, { recursive: true })
     } catch {}
   })
 
-  // baseline for the review gate's diff of everything the swarm changed
+  // brand-new repos have no HEAD: seed an empty baseline so worktree adds,
+  // review diffs, and merges have a commit to anchor to
+  if ((await $`git -C ${PROJECT} rev-parse --verify HEAD`.quiet().nothrow()).exitCode !== 0) {
+    await $`git -C ${PROJECT} commit --allow-empty -m "chore: seed baseline for swarm"`.quiet()
+  }
   const startCommit = (await $`git -C ${PROJECT} rev-parse HEAD`.text()).trim()
 
   console.log(`config: ${CONFIG_PATH ?? "server /config (TUI-managed)"} | worker pool: ${config.roles.worker.map((w) => `${w.providerID}/${w.modelID}×${w.concurrency}`).join(", ")}`)
@@ -627,12 +649,12 @@ async function main() {
         return extractPlan(await lastAssistantText(PROJECT, session))
       } catch (e) {
         if (attempt === 2) throw e
-        console.log(`  planner JSON invalid (${String(e).slice(0, 80)}), asking for a corrected version`)
+        console.log(`  planner output rejected (${String(e).slice(0, 80)}), asking for a corrected version`)
         await promptLong(
           PROJECT,
           session,
           model,
-          "Your JSON failed to parse. Reply with ONLY the corrected JSON object: same content, all strings properly escaped (quotes as \\\", newlines as \\n), no markdown fences, no prose.",
+          `Your plan was rejected: ${String(e)}. Reply with ONLY the corrected JSON object: same overall structure, all strings properly escaped (quotes as \\", newlines as \\n), every path owned by exactly one task, no markdown fences, no prose.`,
         )
       }
     }
