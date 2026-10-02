@@ -14,7 +14,10 @@ const GOAL = args[1]
 const ci = args.indexOf("--config")
 const CONFIG_PATH = ci >= 0 ? args[ci + 1] : undefined
 const SERVER = process.env.SWARM_SERVER ?? "http://127.0.0.1:5678"
-const WORKTREE_ROOT = process.env.SWARM_WORKTREES ?? "/tmp/viprah-swarm/worktrees"
+// per-project subdir: task worktrees from another project's run would
+// otherwise collide on task ids and `worktree remove` cannot clean a
+// worktree registered in a different repo
+const WORKTREE_ROOT = `${process.env.SWARM_WORKTREES ?? "/tmp/viprah-swarm/worktrees"}/${Buffer.from(PROJECT).toString("base64url")}`
 
 type Model = { providerID: string; modelID: string }
 type PoolEntry = Model & { concurrency: number }
@@ -62,6 +65,15 @@ const post = (path: string, body?: unknown) =>
   })
 
 const createSession = async (dir: string) => (await post(`/session${q(dir)}`)).id as string
+
+const alive = (pid: number) => {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
 
 type Part = { type: "text"; text: string } | { type: "file"; mime: string; url: string; filename: string }
 
@@ -468,6 +480,7 @@ async function runTester(id: string, files: string[], plan: Plan, hasBrowser: bo
 // after the build waves merge, a share of sub-agents re-launch as QA testers,
 // each browser-testing a slice of the changed output
 async function testWave(plan: Plan, startCommit: string, at: () => string) {
+  if (!config.testerPercent) return { pass: true, issues: [], testers: 0 }
   const changed = (await $`git -C ${PROJECT} diff --name-only ${startCommit} HEAD`.text())
     .split("\n")
     .map((s) => s.trim())
@@ -599,22 +612,36 @@ async function main() {
   const at = () => ((performance.now() - t0) / 1000).toFixed(1) + "s"
 
   // one driver per project: a previous crashed driver may still be running
-  // and its cleanup would delete this run's branches out from under it
-  const lock = `${WORKTREE_ROOT}/driver-${Buffer.from(PROJECT).toString("base64url")}.lock`
-  try {
-    await $`mkdir ${lock}`.quiet()
-  } catch {
+  // and its cleanup would delete this run's branches out from under it.
+  // The lock dir carries the holder's pid so a dead holder can be reclaimed.
+  const lock = `${WORKTREE_ROOT}/driver.lock`
+  await $`mkdir -p ${WORKTREE_ROOT}`.quiet()
+  for (;;) {
+    const taken = (await $`mkdir ${lock}`.quiet().nothrow()).exitCode !== 0
+    if (!taken) break
+    const pid = Number(await Bun.file(`${lock}/pid`).text().catch(() => ""))
+    if (pid && !alive(pid)) {
+      await $`rm -rf ${lock}`.quiet().nothrow()
+      continue
+    }
     throw new Error(`another driver is already running for ${PROJECT} (${lock})`)
   }
+  await Bun.write(`${lock}/pid`, String(process.pid))
   process.on("exit", () => {
     // must be synchronous: the exit event does not await promises
-    const { rmdirSync } = require("node:fs")
+    const { rmSync } = require("node:fs")
     try {
-      rmdirSync(lock)
+      rmSync(lock, { recursive: true })
     } catch {}
   })
 
-  // baseline for the review gate's diff of everything the swarm changed
+  // project dir may not be a repo yet, and brand-new repos have no HEAD:
+  // init (no-op on existing repos) and seed an empty baseline so worktree
+  // adds, review diffs, and merges have a commit to anchor to
+  await $`git -C ${PROJECT} init`.quiet()
+  if ((await $`git -C ${PROJECT} rev-parse --verify HEAD`.quiet().nothrow()).exitCode !== 0) {
+    await $`git -C ${PROJECT} commit --allow-empty -m "chore: seed baseline for swarm"`.quiet()
+  }
   const startCommit = (await $`git -C ${PROJECT} rev-parse HEAD`.text()).trim()
 
   console.log(`config: ${CONFIG_PATH ?? "server /config (TUI-managed)"} | worker pool: ${config.roles.worker.map((w) => `${w.providerID}/${w.modelID}×${w.concurrency}`).join(", ")}`)
@@ -627,12 +654,12 @@ async function main() {
         return extractPlan(await lastAssistantText(PROJECT, session))
       } catch (e) {
         if (attempt === 2) throw e
-        console.log(`  planner JSON invalid (${String(e).slice(0, 80)}), asking for a corrected version`)
+        console.log(`  planner output rejected (${String(e).slice(0, 80)}), asking for a corrected version`)
         await promptLong(
           PROJECT,
           session,
           model,
-          "Your JSON failed to parse. Reply with ONLY the corrected JSON object: same content, all strings properly escaped (quotes as \\\", newlines as \\n), no markdown fences, no prose.",
+          `Your plan was rejected: ${String(e)}. Reply with ONLY the corrected JSON object: same overall structure, all strings properly escaped (quotes as \\", newlines as \\n), every path owned by exactly one task, no markdown fences, no prose.`,
         )
       }
     }
@@ -719,17 +746,23 @@ async function main() {
   let qa = check.ok ? await testWave(plan, startCommit, at) : { pass: false, issues: [] as string[], testers: 0 }
   let review = check.ok ? await reviewGate(plan, startCommit) : { pass: false, issues: [] as string[] }
   if (check.ok) console.log(`[${at()}] review: ${review.pass ? "PASS" : `${review.issues.length} issue(s)`}${review.note ? ` (${review.note})` : ""}`)
+  const missing = plan.tasks.filter((t) => !results[t.id]?.ok)
+  const missingNote = missing.length
+    ? `Planned tasks that never landed (failed or skipped) — implement any of their work still missing:\n${missing.map((t) => `- ${t.id}: ${t.title} → ${t.paths.join(", ")}`).join("\n")}\n\n`
+    : ""
   let fixAttempts = 0
-  while ((!check.ok || !qa.pass || !review.pass) && fixAttempts < 2) {
+  while ((!check.ok || !qa.pass || !review.pass || missing.length > 0) && fixAttempts < 2) {
     fixAttempts++
-    const detail = !check.ok
-      ? check.detail
-      : [
-          qa.pass ? "" : `QA tester findings:\n${qa.issues.map((i) => `- ${i}`).join("\n")}`,
-          review.pass ? "" : `Quality review findings:\n${review.issues.map((i) => `- ${i}`).join("\n")}`,
-        ]
-          .filter(Boolean)
-          .join("\n\n") + "\n\nFix every issue. Keep changes minimal."
+    const detail =
+      missingNote +
+      (!check.ok
+        ? check.detail
+        : [
+            qa.pass ? "" : `QA tester findings:\n${qa.issues.map((i) => `- ${i}`).join("\n")}`,
+            review.pass ? "" : `Quality review findings:\n${review.issues.map((i) => `- ${i}`).join("\n")}`,
+          ]
+            .filter(Boolean)
+            .join("\n\n") + "\n\nFix every issue. Keep changes minimal.")
     // a fixer infra failure (timeout, provider error) must not nuke the run —
     // the build output is already merged; report what we have
     try {
