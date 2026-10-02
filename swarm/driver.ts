@@ -14,7 +14,10 @@ const GOAL = args[1]
 const ci = args.indexOf("--config")
 const CONFIG_PATH = ci >= 0 ? args[ci + 1] : undefined
 const SERVER = process.env.SWARM_SERVER ?? "http://127.0.0.1:5678"
-const WORKTREE_ROOT = process.env.SWARM_WORKTREES ?? "/tmp/viprah-swarm/worktrees"
+// per-project subdir: task worktrees from another project's run would
+// otherwise collide on task ids and `worktree remove` cannot clean a
+// worktree registered in a different repo
+const WORKTREE_ROOT = `${process.env.SWARM_WORKTREES ?? "/tmp/viprah-swarm/worktrees"}/${Buffer.from(PROJECT).toString("base64url")}`
 
 type Model = { providerID: string; modelID: string }
 type PoolEntry = Model & { concurrency: number }
@@ -611,7 +614,7 @@ async function main() {
   // one driver per project: a previous crashed driver may still be running
   // and its cleanup would delete this run's branches out from under it.
   // The lock dir carries the holder's pid so a dead holder can be reclaimed.
-  const lock = `${WORKTREE_ROOT}/driver-${Buffer.from(PROJECT).toString("base64url")}.lock`
+  const lock = `${WORKTREE_ROOT}/driver.lock`
   await $`mkdir -p ${WORKTREE_ROOT}`.quiet()
   for (;;) {
     const taken = (await $`mkdir ${lock}`.quiet().nothrow()).exitCode !== 0
@@ -632,8 +635,10 @@ async function main() {
     } catch {}
   })
 
-  // brand-new repos have no HEAD: seed an empty baseline so worktree adds,
-  // review diffs, and merges have a commit to anchor to
+  // project dir may not be a repo yet, and brand-new repos have no HEAD:
+  // init (no-op on existing repos) and seed an empty baseline so worktree
+  // adds, review diffs, and merges have a commit to anchor to
+  await $`git -C ${PROJECT} init`.quiet()
   if ((await $`git -C ${PROJECT} rev-parse --verify HEAD`.quiet().nothrow()).exitCode !== 0) {
     await $`git -C ${PROJECT} commit --allow-empty -m "chore: seed baseline for swarm"`.quiet()
   }
@@ -741,17 +746,23 @@ async function main() {
   let qa = check.ok ? await testWave(plan, startCommit, at) : { pass: false, issues: [] as string[], testers: 0 }
   let review = check.ok ? await reviewGate(plan, startCommit) : { pass: false, issues: [] as string[] }
   if (check.ok) console.log(`[${at()}] review: ${review.pass ? "PASS" : `${review.issues.length} issue(s)`}${review.note ? ` (${review.note})` : ""}`)
+  const missing = plan.tasks.filter((t) => !results[t.id]?.ok)
+  const missingNote = missing.length
+    ? `Planned tasks that never landed (failed or skipped) — implement any of their work still missing:\n${missing.map((t) => `- ${t.id}: ${t.title} → ${t.paths.join(", ")}`).join("\n")}\n\n`
+    : ""
   let fixAttempts = 0
-  while ((!check.ok || !qa.pass || !review.pass) && fixAttempts < 2) {
+  while ((!check.ok || !qa.pass || !review.pass || missing.length > 0) && fixAttempts < 2) {
     fixAttempts++
-    const detail = !check.ok
-      ? check.detail
-      : [
-          qa.pass ? "" : `QA tester findings:\n${qa.issues.map((i) => `- ${i}`).join("\n")}`,
-          review.pass ? "" : `Quality review findings:\n${review.issues.map((i) => `- ${i}`).join("\n")}`,
-        ]
-          .filter(Boolean)
-          .join("\n\n") + "\n\nFix every issue. Keep changes minimal."
+    const detail =
+      missingNote +
+      (!check.ok
+        ? check.detail
+        : [
+            qa.pass ? "" : `QA tester findings:\n${qa.issues.map((i) => `- ${i}`).join("\n")}`,
+            review.pass ? "" : `Quality review findings:\n${review.issues.map((i) => `- ${i}`).join("\n")}`,
+          ]
+            .filter(Boolean)
+            .join("\n\n") + "\n\nFix every issue. Keep changes minimal.")
     // a fixer infra failure (timeout, provider error) must not nuke the run —
     // the build output is already merged; report what we have
     try {
